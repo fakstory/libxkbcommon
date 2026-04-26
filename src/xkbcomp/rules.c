@@ -11,8 +11,10 @@
 #include "config.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "xkbcommon/xkbcommon.h"
 #include "xkbcomp-priv.h"
@@ -595,12 +597,21 @@ matcher_include(struct matcher *m, struct scanner *parent_scanner,
                                          buf, sizeof(buf));
     if (expanded < 0) {
         /* Error */
+        log_warn(m->ctx, XKB_LOG_MESSAGE_NO_ID,
+                 "rules include: %%-expansion failed for \"%.*s\""
+                 " (parent: %s)\n",
+                 (unsigned int) inc.len, inc.start,
+                 parent_scanner->file_name);
         return;
     } else if (expanded > 0) {
         /* %-expanded */
         stmt_file = buf;
         stmt_file_len = (size_t) expanded;
         assert(stmt_file[stmt_file_len] == '\0');
+        log_dbg(m->ctx, XKB_LOG_MESSAGE_NO_ID,
+                "rules include: \"%.*s\" expanded to \"%s\" (parent: %s)\n",
+                (unsigned int) inc.len, inc.start, stmt_file,
+                parent_scanner->file_name);
     }
 
     /* Lookup the first candidate */
@@ -627,6 +638,15 @@ matcher_include(struct matcher *m, struct scanner *parent_scanner,
             assert(stmt_file[stmt_file_len] == '\0');
         }
         file = fopen(stmt_file, "rb");
+        if (!file) {
+            log_warn(m->ctx, XKB_LOG_MESSAGE_NO_ID,
+                     "rules include: failed to open absolute path \"%s\""
+                     " (from \"%.*s\"%s): %s\n",
+                     stmt_file,
+                     (unsigned int) inc.len, inc.start,
+                     expanded ? ", after %-expansion" : "",
+                     strerror(errno));
+        }
     } else {
         /* Relative path: lookup the first XKB path */
         if (unlikely(expanded)) {
@@ -652,6 +672,10 @@ matcher_include(struct matcher *m, struct scanner *parent_scanner,
 
     while (file) {
         assert(strlen_safe(buf) < sizeof(buf));
+        log_dbg(m->ctx, XKB_LOG_MESSAGE_NO_ID,
+                "rules include: opened \"%s\" (from \"%.*s\"%s)\n",
+                buf, (unsigned int) inc.len, inc.start,
+                expanded ? ", after %-expansion" : "");
         bool ret = read_rules_file(m->ctx, m, include_depth + 1, file, buf);
         fclose(file);
         if (ret)
@@ -660,6 +684,11 @@ matcher_include(struct matcher *m, struct scanner *parent_scanner,
         log_err(m->ctx, XKB_LOG_MESSAGE_NO_ID,
                 "No components returned from included XKB rules \"%s\"\n",
                 buf);
+        log_warn(m->ctx, XKB_LOG_MESSAGE_NO_ID,
+                "rules include: no components matched in \"%s\""
+                " (from \"%.*s\"%s)\n",
+                buf, (unsigned int) inc.len, inc.start,
+                expanded ? ", after %-expansion" : "");
 
         if (absolute_path) {
             /* There is no point to search further if the path is absolute */
@@ -1999,8 +2028,18 @@ xkb_resolve_rules(struct xkb_context *ctx,
      * ! include <include path n>/rules/<rules>.post // only if defined
      */
 
+    /*
+     * Use a separate buffer for partial rules: xkb_resolve_partial_rules
+     * overwrites its `path` argument on every FindFileInXkbPath probe, even
+     * when no .pre/.post file is found. Sharing the buffer with `path` would
+     * leave a stale (non-existent) `<rules>.pre` filename in `path` and cause
+     * the diagnostics for the *main* rules file below to misreport the
+     * filename. Keep `path` as the canonical filename of the main rules file.
+     */
+    char partial_path[PATH_MAX];
+
     /* XKB extension: resolve optional <rules>.pre files */
-    ret = xkb_resolve_partial_rules(ctx, path, sizeof(path),
+    ret = xkb_resolve_partial_rules(ctx, partial_path, sizeof(partial_path),
                                     rules, ".pre", matcher);
     if (!ret)
         goto err_out;
@@ -2014,7 +2053,7 @@ xkb_resolve_rules(struct xkb_context *ctx,
     }
 
     /* XKB extension: resolve optional <rules>.post files */
-    ret = xkb_resolve_partial_rules(ctx, path, sizeof(path),
+    ret = xkb_resolve_partial_rules(ctx, partial_path, sizeof(partial_path),
                                     rules, ".post", matcher);
     if (!ret)
         goto err_out;
