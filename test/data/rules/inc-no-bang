@@ -1,0 +1,7 @@
+// Regression test for the partial-rules path-buffer reuse bug.
+// `include` without a leading `!` is invalid in xkb_rules grammar.
+// Before the fix, the parse error misreported the filename as
+// "<this>.pre" because xkb_resolve_rules and xkb_resolve_partial_rules
+// shared the same path[PATH_MAX] buffer. After the fix the diagnostic
+// must reference this file's real name.
+include %S/inc-dst-simple

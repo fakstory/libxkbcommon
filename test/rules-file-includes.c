@@ -7,10 +7,31 @@
 #include "config.h"
 #include "test-config.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "xkbcommon/xkbcommon.h"
 #include "test.h"
 #include "utils.h"
+#include "darray.h"
 #include "xkbcomp/rules.h"
+
+ATTR_PRINTF(3, 0) static void
+log_fn_capture(struct xkb_context *ctx, enum xkb_log_level level,
+               const char *fmt, va_list args)
+{
+    (void) level;
+    darray_char *ls = xkb_context_get_user_data(ctx);
+    if (!ls)
+        return;
+    char *s = NULL;
+    int size = vasprintf(&s, fmt, args);
+    if (size < 0 || !s)
+        return;
+    darray_append_string(*ls, s);
+    free(s);
+}
 
 struct test_data {
     /* Rules file */
@@ -161,6 +182,44 @@ main(int argc, char *argv[])
         .compat = "default_compat", .symbols = "my_symbols",
     };
     assert(test_rules(ctx, &test8));
+
+    /*
+     * Regression: when xkb_resolve_rules processes a rules file that has no
+     * matching <rules>.pre file, the search-loop probe for ".pre" used to
+     * leave the last attempted (non-existent) <rules>.pre filename in the
+     * shared path[PATH_MAX] buffer. read_rules_file then reported parse
+     * errors under the <rules>.pre filename instead of the real filename.
+     *
+     * "inc-no-bang" contains an unprefixed `include` (missing the leading
+     * `!`), which the rules grammar rejects. The assertion checks that the
+     * captured error names "inc-no-bang" — never "inc-no-bang.pre".
+     */
+    {
+        struct xkb_context *log_ctx = test_get_context(0);
+        assert(log_ctx);
+        darray_char captured;
+        darray_init(captured);
+        xkb_context_set_user_data(log_ctx, &captured);
+        xkb_context_set_log_fn(log_ctx, log_fn_capture);
+        xkb_context_set_log_level(log_ctx, XKB_LOG_LEVEL_WARNING);
+
+        struct test_data test_no_bang = {
+            .rules = "inc-no-bang",
+            .model = "my_model", .layout = "my_layout",
+            .variant = "", .options = "",
+            .should_fail = true,
+        };
+        assert(test_rules(log_ctx, &test_no_bang));
+
+        const char *log = darray_items(captured);
+        fprintf(stderr, "Captured log:\n%s", log ? log : "(empty)");
+        assert(log);
+        assert(strstr(log, "inc-no-bang") != NULL);
+        assert(strstr(log, "inc-no-bang.pre") == NULL);
+
+        darray_free(captured);
+        xkb_context_unref(log_ctx);
+    }
 
     xkb_context_unref(ctx);
     return 0;
